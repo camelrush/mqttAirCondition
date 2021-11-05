@@ -3,7 +3,7 @@
 ## <span style="color:#DD8800; ">（RaspberryPi）温度・湿度センサー環境の作成</span>
 
 最初に、RaspberryPiに作業フォルダを作成する。
-```
+``` bash
 $ mkdir AirCondition
 $ cd AirCondition
 ```
@@ -13,13 +13,13 @@ $ cd AirCondition
 ![DHT11](./doc/DHT11.png)
 
 GitHubからDHT11のライブラリを取得する。
-```
+``` bash
 $ sudo git clone https://github.com/szazo/DHT11_Python.git
 ```
 
 サンプル起動し、以下のように表示されれば接続はOK。
 
-```
+``` bash
 $ sudo python3 ./DHT11_Python/example.py
 
 Last valid input: 2021-11-03 22:44:57.427497
@@ -33,7 +33,7 @@ Humidity: 73.0 %
 
 このサンプルソースをベースに、内容を作りこんでいく。
 
-```
+``` bash
 # サンプルをコピー 
 $ sudo cp ./DHT11_Python/example.py ./aircond.py
 
@@ -75,7 +75,7 @@ $ sudo rm -rf ./DHT11_Python
 
 最初に、MQTTクライアントのライブラリをインストールする。
 
-```
+``` bash
 $ pip3 install paho-mqtt python-etcd
 ```
 
@@ -83,7 +83,7 @@ $ pip3 install paho-mqtt python-etcd
 修正後の[ソースはこちら](./aircond2.py)。  
 ※ソース上の定義部分「# Mqtt Define」の内容は、前述のデバイスデータエンドポイントや、証明書に置き換えてください。
 
-----
+---- 
 #### ここでのハマりどころ
 - 注意点として、<span style="color:#FF4400">取得した証明書や秘密鍵を作業フォルダにコピーしないこと。</span>  
   `「$ git add .」`でうっかりGitHubにアップされてしまうリスクがある。  
@@ -99,7 +99,7 @@ $ pip3 install paho-mqtt python-etcd
 - 「テスト」>「MQTTテストクライアント」を選択する。
 - 「トピックをサブスクライブする」の「トピックのフィルター」に「topicAirCondition」と入力して、「サブスクライブ」を押す。
 - 画面に、一定周期で以下のように表示されれば、受信OK。
-```
+``` bash
 topicAirCondition
 November 01, 2021, 22:23:12 (UTC+0900)
 {
@@ -178,9 +178,10 @@ Content-Type : application/json
 ## <span style="color:#DD8800; ">（RaspberryPi）AWS Lambda用のファンクションを作成する
 
 作業用のフォルダを作成する。
-```
+``` bash
 $ mkdir aws_lambda
 $ cd aws_lambda
+
 $ mkdir airConditionNotifyLineFunc
 $ cd airConditionNotifyLineFunc
 ```
@@ -188,12 +189,12 @@ $ cd airConditionNotifyLineFunc
 ※ソースコード中の "access_token" は、後ほどlambda上で環境変数として設定する。
 
 このソースファイルに必要なライブラリ「requests」を、カレントディレクトリ上にインストールする。
-```
+``` bash
 $ pip install requests -t ./
 ```
 
 ソース＋ライブラリをlambdaへのアップロード用にzip圧縮する。
-```
+``` bash
 # カレントディレクトリにlambda_function.pyと各種ライブラリがあることを確認
 $ ls 
   bin                                 idna-3.3.dist-info
@@ -281,19 +282,242 @@ $ zip -r airConditionNotifyLineFunc.zip ./*
   - [開発ガイドライン](https://developers.line.biz/ja/docs/messaging-api/development-guidelines/)：「いかなる目的でも、同一ユーザーへメッセージを大量送信しないでください。」  
 
   基本的に多くても1分に1回を上限とするのがよさそう。上記いずれかに抵触すると、HTTPステータスコード「429」応答が返るようになる。そうでなくても、開発ガイドラインの記載違反なので、いつBANされるか…。
-
-
 ----
+<br>
+
+# <span style="color:#22AAFF">ElasticSearch+Kibanaでセンサーデータをグラフに可視化する</span>
+
+## <span style="color:#DD8800; ">（AWS）VPCネットワークとEC2環境を構築する
+
+独立したVPN一つと、publicサブネットを一つ作成し、上にEC2を構築する。  
+
+  |種別|名前|IPアドレス|  
+  |--|--|--|  
+  |VPC|biweb-dev-vpc|10.0.0.0/16|  
+  |サブネット|biweb-dev-pub-subnet1|10.0.32.0/20|  
+  |EC2|biweb-dev-web|10.0.20.240/20|  
+
+- EC2を作成する前に、サブネットの「自動割当IP設定」を有効化する。
+
+- EC2作成時、セキュリティグループには、SSHアクセスだけを許可とする。Sourceは「マイIP」をクリックして自宅のIPからの要求だけ許可とする
+- EC2作成後、アクセス用のキーペアをダウンロードして保存しておく。
+- EC2作成後、パブリックIPv4アドレスが割当されていることを確認する。
+
+<br>
+自PCからのSSHアクセス
+- VPCメニューから、インターネットゲートウェイを作成（biweb-dev-igw）して、サブネット（biweb-dev-pub-subnet1）にアタッチする。
+
+- VPCメニューから、サブネットを選択し、作成したサブネットのルートテーブルに以下を加える。 
+
+  |送信先|ターゲット|
+  |--|--|
+  |0.0.0.0/0|（作成したIGW）|
+
+- ローカルPCで「Tera Term」を起動して、「Host」に作成したEC2のパブリックIPv4アドレスを指定する。  
+  ![teraterm1](./doc/teraterm1.png)
+
+- OK押下後の認証画面で、以下の内容を設定してOKをクリック。
+   - 「User name」に「ec2-user」（これは固定値）
+   - 「Use RSA/~(略)～ key to log in [Private key file:]」に、ダウンロードしたキーを選択  
+  ![teraterm2](./doc/teraterm2.png)
+
+- 以下のとおり、ログインが成功すれば、準備OK。
+
+  ![teraterm3](./doc/teraterm3.png)
+
+なお、Amazon Linux2 EC2は、システム時間がGMTとなっており、日本時間と9時間のずれがある。  
+[ここ](https://docs.aws.amazon.com/ja_jp/AWSEC2/latest/UserGuide/set-time.html#change_time_zone)を参考に、システム時間を日本標準時に設定する。
+
+その後、必要最低限のソフトをインストールして環境を準備する
+
+``` bash
+# yumリポジトリ更新
+$ sudo yum update -y
+
+# java8 OpenJDK
+$ sudo yum install java-1.8.0-openjdk.x86_64
+```
+
+## <span style="color:#DD8800; ">（AWS）EC2にElasticSearchをセットアップする
+
+[公式サイト](https://www.elastic.co/guide/en/elasticsearch/reference/current/rpm.html)を参照しつつ、RPMを使用してインストールを行う。
+
+GPG-KEYをローカルリポジトリにインポートする  　※GPGの説明は[こちら](https://qiita.com/y518gaku/items/435838097c700bbe6d1b#gpg%E3%81%A8%E3%81%AF)を参照
+```
+$ sudo rpm --import https://artifacts.elastic.co/GPG-KEY-elasticsearch
+```
+
+ElasticSearch RPMのrepoを所定フォルダに生成する
+``` bash
+$ sudo nano /etc/yum.repos.d/elasticsearch.repo
+```
+
+elasticsearch.repo への記載内容は以下の通り。
+``` bash
+[elasticsearch]
+name=Elasticsearch repository for 7.x packages
+baseurl=https://artifacts.elastic.co/packages/7.x/yum
+gpgcheck=1
+gpgkey=https://artifacts.elastic.co/GPG-KEY-elasticsearch
+enabled=0
+autorefresh=1
+type=rpm-md
+```
+
+インストールコマンドを実行する
+``` bash
+$ sudo yum install --enablerepo=elasticsearch elasticsearch
+：
+：
+Installed:
+  elasticsearch.x86_64 0:7.15.1-1
+
+Complete!
+```
+
+外部アドレスからのアクセスを可能にするため、設定ファイル「elasticsearch.yml」を開く。
+```
+$ sudo nano /etc/elasticsearch/elasticsearch.yml  
+```
+
+以下の箇所に追記を修正して、ファイルを保存。
+```
+# By default Elasticsearch is only accessible on localhost. Set a different
+# address here to expose this node on the network:
+#
+#network.host: 192.168.0.1
+network.host: 0.0.0.0   # ←ここを追記
+discovery.type: single-node # ←ここを追記
+```
+
+また、同じファイルに対して最後の行に次の内容を設定しておく。
+```
+xpack.security.enabled: false  # ←ここを追記
+```
+上の意図は「セキュリティ機能を使用しない」というもの。  
+今回はあえて使用しない。このように明示的に設定しないと、Kibana操作時に警告が多発する
+
+↓ 警告表示の例（うざい）  
+
+![elastic security err](./doc/elasticsecerr.png)
 
 
+システム起動時にElasticSearchを起動するようにする（systemd）
+``` bash
+$ sudo /bin/systemctl daemon-reload
+$ sudo /bin/systemctl enable elasticsearch.service
 
-## ElasticSearch
+$ # （ちなみに、システムを 起動をやめさせたい場合は次のとおり）
+$ sudo /bin/systemctl disable elasticsearch.service
 
+```
 
-[ここ](https://docs.aws.amazon.com/ja_jp/AWSEC2/latest/UserGuide/set-time.html#change_time_zone)を参考にEC2内の標準時間を、日本の標準時に設定する。
+以下、動作確認。まずはPCを再起動。
+``` bash
+$ sudo shutdown -r now
+```
 
+再起動後、起動状態をチェックする
 
-スキーマ定義
+``` bash
+$ sudo systemctl | grep elastic
+elasticsearch.service         loaded active running   Elasticsearch
+```
+
+以下のコマンドでサービス自体の起動を確認（デフォルトポートは 9200）
+``` bash
+$ sudo curl http://localhost:9200
+{
+  "name" : "ip-10-0-23-98.ap-northeast-1.compute.internal",
+  "cluster_name" : "elasticsearch",
+  "cluster_uuid" : "9RtovLuBTuyvlNjuMLLekg",
+  "version" : {
+    "number" : "7.15.1",
+    "build_flavor" : "default",
+    "build_type" : "rpm",
+    "build_hash" : "83c34f456ae29d60e94d886e455e6a3409bba9ed",
+    "build_date" : "2021-10-07T21:56:19.031608185Z",
+    "build_snapshot" : false,
+    "lucene_version" : "8.9.0",
+    "minimum_wire_compatibility_version" : "6.8.0",
+    "minimum_index_compatibility_version" : "6.0.0-beta1"
+  },
+  "tagline" : "You Know, for Search"
+}
+```
+
+同様に外部からのアクセスを確認。ブラウザで「http://[ip address]:9200/」にアクセスし、上と同じ表示がされればOK。
+
+## <span style="color:#DD8800; ">（AWS）EC2にKibanaをセットアップする
+
+Kibana RPMのrepoを所定フォルダに生成する
+``` bash
+$ sudo nano /etc/yum.repos.d/kibana.repo
+```
+
+kibana.repo への記載内容は以下の通り。
+``` bash
+[kibana-7.x]
+name=Kibana repository for 7.x packages
+baseurl=https://artifacts.elastic.co/packages/7.x/yum
+gpgcheck=1
+gpgkey=https://artifacts.elastic.co/GPG-KEY-elasticsearch
+enabled=1
+autorefresh=1
+type=rpm-md
+```
+
+インストールコマンドを実行する
+``` bash
+$ sudo yum install kibana 
+：
+：
+Installed:
+  kibana.x86_64 0:7.15.1-1
+
+Complete!
+```
+
+外部アドレスからのアクセスを可能にするために、設定ファイル「kibana.yml」を開く。
+```
+$ sudo nano /etc/kibana/kibana.yml
+```
+
+以下の箇所に追記を行って、ファイルを保存。
+``` bash
+# To allow connections from remote users, set this parameter to a non-loopback $
+# server.host: "localhost"
+server.host: "0.0.0.0"   # ← ここを追記
+```
+
+システム起動時にKibanaを起動するようにする（systemd）
+``` bash
+$ sudo /bin/systemctl daemon-reload
+$ sudo /bin/systemctl enable kibana.service
+```
+
+動作確認。まずはPCを再起動。
+``` bash
+$ sudo shutdown -r now
+```
+
+再起動後、起動状態をチェックする
+``` bash
+$ sudo systemctl | grep kibana
+kibana.service         loaded active running   Kibana
+```
+
+以下のコマンドでサービス自体の起動を確認（デフォルトポートは 5601）
+``` bash
+$ sudo curl http://localhost:5601
+```
+
+↑ 特にエラーなど、何もでなければ、おそらく(笑) 問題なし。
+ブラウザで「http://[ip address]:5601/」にアクセスし、下の画面が表示がされればOK。
+
+![kibana](./doc/kibana.png)
+
+VisualStudioCodeのRestClientを使用して、ElasticSearchにIndexを定義する。
 
 ``` json 
 PUT http://[host_ipaddress]:9200/iot_data/
@@ -317,14 +541,6 @@ Content-Type: application/json
 }
 ```
 
-データ投入
-``` json
-POST http://[host_ipaddress]:9200/iot_data/_doc/
-Content-Type: application/json
+## <span style="color:#DD8800; ">（RaspberryPi）AWS Lambda用のファンクションを作成する
 
-{
-    "GetDateTime": "2021-11-03 16:22:58",
-    "Humidity": 11.1,
-    "Temperature": 11.1
-}
-```
+## <span style="color:#DD8800; ">（AWS）センサデータを蓄積して時系列の空調グラフを表示する
