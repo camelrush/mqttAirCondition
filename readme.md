@@ -1,3 +1,5 @@
+![全景](./doc/全景.png)
+
 # <span style="color:#22AAFF">センサで温湿度を計測し、AWSにデータを通知する</span>
 
 ## <span style="color:#DD8800; ">（RaspberryPi）温度・湿度センサー環境の作成</span>
@@ -543,4 +545,180 @@ Content-Type: application/json
 
 ## <span style="color:#DD8800; ">（RaspberryPi）AWS Lambda用のファンクションを作成する
 
-## <span style="color:#DD8800; ">（AWS）センサデータを蓄積して時系列の空調グラフを表示する
+作業用のフォルダを作成する。
+``` bash
+$ cd aws_lambda
+
+$ mkdir airConditionESEntryFunc
+$ cd airConditionESEntryFunc
+```
+直下に、pythonソースファイル [lambda_function.py](./aws_lambda/airConditionESEntryFunc/lambda_function.py) を作成する。  
+※ソースコード中の "es_host","es_port","index" は、後ほどlambda上で環境変数として設定する。
+
+このソースファイルに必要なライブラリ「requests」を、カレントディレクトリ上にインストールする。
+``` bash
+$ pip install requests -t ./
+```
+
+ソース＋ライブラリをlambdaへのアップロード用にzip圧縮する。
+``` bash
+# カレントディレクトリにlambda_function.pyと各種ライブラリがあることを確認
+$ ls 
+  bin                                 idna-3.3.dist-info
+  certifi                             lambda_function.py
+  certifi-2021.10.8.dist-info         requests
+  charset_normalizer                  requests-2.26.0.dist-info
+  charset_normalizer-2.0.7.dist-info  urllib3
+  idna                                urllib3-1.26.7.dist-info
+
+$ zip -r airConditionESEntryFunc.zip ./*
+```
+
+## <span style="color:#DD8800; ">（AWS）ElasticSerach登録用のLambda関数を作成する
+
+以下の手順でlambda関数を作成する
+- 「サービス」から「Lambda」を選択。
+- 「関数」>「関数の作成」画面で、以下を指定して「関数の作成」をクリックする。
+  - 関数名：「airConditionESEntryFunc」。名称自体は任意だが、前の手順でzip作成した際の、フォルダ名とあわせる
+  - ランタイム：Python 3.9
+  - アーキテクチャ：x86_64
+  - アクセス権限>デフォルトの実行ロールの変更：
+    - 「基本的な Lambda アクセス権限で新しいロールを作成」を選択
+- 「コード」タブ開く
+  - 画面右上の「アップロード元」に「.zip」ファイルを選択する。前の手順で作成したzipファイルを指定して、ソースをアップロードする。
+- 「設定」タブ>「アクセス権限」を開く
+  - 「実行ロール」に表示されたロール名のリンクをクリック（IAMのロール画面に遷移する）
+  - 「ポリシーをアタッチします」をクリックして、次のポリシーを追加
+    - `AmazonDynamoDBFullAccess`
+    - `AWSLambdaVPCAccessExecutionRole`
+- 「設定」タブ>「環境変数」で「編集」ボタンを押して以下の環境変数を追加
+  - 「es_host」：EC2の<b><u>`プライベートIPv4アドレス`</u></b>を設定する。
+  - 「es_port」：「9200」を設定する
+  - 「index」：「iot_data」を設定する
+
+次に、EC2のセキュリティグループに、Lambdaからのアクセス(Private内部からのアクセス)を許可するように設定する。
+
+- 「サービス」から「EC2」を選択。
+- 「インスタンス」から構築した「EC2」を選択。
+- 画面下部で「セキュリティ」を選び、当該セキュリティグループのハイパーリンクから、内容を画面に表示する。
+- 「インバウンドルール」タブで、「インバウンドのルールを編集」をクリックする。
+- 以下のルールを追加
+  - タイプ：カスタムTCP
+  - ポート範囲：9200
+  - ソース：（開いているセキュリティグループ自身）
+  ![secgroup](./doc/secgroupadd.png)
+
+
+動作確認。
+- 「コード」タブ>「テスト」で、「テスト」ボタンに以下の内容を登録して、テスト実行する。
+``` json 
+{
+    "Records": [
+        {
+            "dynamodb": {
+                "NewImage": {
+                    "GetDateTime": {
+                        "S": "2021-11-03 16:20:18"
+                    },
+                    "Temperature": {
+                        "N": "20.5"
+                    },
+                    "Humidity": {
+                        "N": "72.3"
+                    }
+                }
+            }
+        }
+    ]
+}
+```
+ブラウザから、KibanaのURLにアクセスし、Discover画面でデータが表示されれば疎通確認としてはOK。
+
+正常に登録されることを確認できたら、以下の手順でDynamoDBテーブルの変更通知とつなげる。
+
+- 「設定」タブ>「トリガー」で「トリガーを追加」ボタンをクリック
+  - 「トリガーの設定」で「DynamoDB」を選択。
+    - DynamoDBテーブル：「air-condition」
+    - トリガーの有効化：チェック
+
+<br>
+
+トリガーが設定されると、1分に1回、ElasticSearchにデータが蓄積されるようになる。
+
+
+## <span style="color:#DD8800; ">（RaspberryPi）二酸化炭素センサ、液晶ディスプレイを取り付ける
+
+上記で温湿度センサーデータの連携は実現できた。これに加え、以下では二酸化炭素量の計測を行い、温湿度データとともにサーバへの送信、LINEへの通知、グラフ表示を行う。  
+
+新たに、次のパーツを使用する。
+- 液晶：Aideepen [SSD1306](https://www.amazon.co.jp/Aideepen-OLED%E3%83%87%E3%82%A3%E3%82%B9%E3%83%97%E3%83%AC%E3%82%A4IIC-OLED%E3%83%A2%E3%82%B8%E3%83%A5%E3%83%BC%E3%83%ABSSD1306-4%E3%83%94%E3%83%B3SPI%E3%82%A4%E3%83%B3%E3%82%BF%E3%83%BC%E3%83%95%E3%82%A7%E3%82%A4%E3%82%B9%E7%94%BB%E9%9D%A2-Arduino%E3%81%AB%E5%AF%BE%E5%BF%9C/dp/B099ZYRJWL/ref=sr_1_1_sspa?keywords=SSD1306&qid=1636469302&sr=8-1-spons&psc=1&spLa=ZW5jcnlwdGVkUXVhbGlmaWVyPUEzNUtHRFFOS0lIODFYJmVuY3J5cHRlZElkPUEwNzM0NzI2Mjk3UUJLRlUyM1lWNSZlbmNyeXB0ZWRBZElkPUEyNEdLQUE4WUFKRkhaJndpZGdldE5hbWU9c3BfYXRmJmFjdGlvbj1jbGlja1JlZGlyZWN0JmRvTm90TG9nQ2xpY2s9dHJ1ZQ==)
+- 二酸化炭素センサ：KeyeStudio [CCS811](https://www.amazon.co.jp/KEYESTUDIO-CCS811-Arduino-%E3%82%A2%E3%83%AB%E3%83%89%E3%82%A5%E3%82%A4%E3%83%BC%E3%83%8E-%E3%82%A2%E3%83%AB%E3%83%87%E3%82%A3%E3%83%BC%E3%83%8E/dp/B086HCSM6N?ref_=ast_sto_dp)
+
+RaspberryPiに、以下のように取付を行う。
+
+![取付例](./doc/CCS811&SSD1306.png)
+
+取付時のポイント
+- 各機器のVIN、GNDは、RaspberryPiの5V、GNDと接続する（動作に4.5V以上が必要なため、電源は3.3Vではなく、5Vの方に接続すること）
+- 各機器のSDA、SCLをそれぞれ、RaspberryPiのSDA(Pin#3)、SCL(Pin#5)と接続する。
+- さらにCCS811のWAKEとGND同士を接続する。RSTとINTは今回使用しない。
+
+今回のパーツは、I2Cというインターフェイスで接続を行う。機器を接続したら、RaspberryPiのターミナルから以下のコマンドを実行する。
+```
+$ i2cdetect -y 1
+```
+これにより、機器の接続状況が確認できる。  
+以下のとおり表示されれば、接続OK。
+![i2cdetect](./doc/i2cdetect.png)  
+
+表内の値は、それぞれ各機器の接続状態を示している。これらが表示されなければ、上のポイントを参考に、接続を再確認すること。
+- アドレス3c … SSD1306(液晶)
+- アドレス5a … CCS811(二酸化炭素センサ)
+
+次に、I2Cの通信速度（ボーレート）を変更する。特にCCS811(二酸化炭素センサ)は、RaspberryPiのデフォルト速度100kHzでは動作せず、エラー「Remote I/O Error」が表示されてしまうことがある。
+
+以下のコマンドを実行し、設定を編集する。
+``` bash
+$ sudo nano /boot/config.txt
+```
+
+編集画面が表示されたら、次の部分を編集して、保存する。
+![baudrate](./doc/baudrate.png)
+```
+dtparam=i2c_arm=on,i2c_arm_baudrate=60000
+```
+
+編集が終わったら、一度RaspberryPiを再起動する。
+``` bash
+$ sudo reboot
+```
+
+再起動したら、必要なライブラリをPython環境にインストールする。
+``` python
+# SSD1306用ドライバ インストール
+$ pip3 install adafruit-circuitpython-ssd1306 
+
+# CCS811用ドライバ インストール
+$ pip3 install adafruit-circuitpython-ccs811 
+
+# 液晶表示用のフォント インストール
+$ sudo apt-get install fonts-noto 
+```
+
+[こちら](./aircond3.py)のソースを作業フォルダ直下に配置して、実行する  
+※ソース上の定義部分「# Mqtt Define」の内容は、前述のデバイスデータエンドポイントや、証明書に置き換えてください。
+
+```
+$ python3 aircond3.py
+```
+以下のように表示されればOK。
+![gamen](./doc/WIN_20211110_00_19_55_Pro.jpg)
+
+## <span style="color:#DD8800; ">（AWS）各種サービスを修正
+以下の各種サービスに対して、二酸化炭素値を加え、Kibanaのグラフ出力、LINEの通知内容を編集していく（詳細は割愛する）
+- IoT Core
+- DynamoDB
+- Lambda
+- ElasticSearch
+- Kibana
+
